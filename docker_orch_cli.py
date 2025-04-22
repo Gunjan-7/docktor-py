@@ -280,10 +280,14 @@ class ResourceMonitor:
                 import msvcrt
                 while self.running:
                     if msvcrt.kbhit():
-                        key = msvcrt.getch().decode('utf-8').lower()
-                        if key == 'q':
-                            self.running = False
-                            break
+                        try:
+                            key = msvcrt.getch().decode('utf-8', errors='replace').lower()
+                            if key == 'q':
+                                self.running = False
+                                break
+                        except Exception:
+                            # Ignore any decoding errors
+                            pass
                     time.sleep(0.1)
             else:
                 import tty
@@ -295,10 +299,14 @@ class ResourceMonitor:
                     tty.setraw(fd)
                     while self.running:
                         if select.select([sys.stdin], [], [], 0.1)[0]:
-                            key = sys.stdin.read(1).lower()
-                            if key == 'q':
-                                self.running = False
-                                break
+                            try:
+                                key = sys.stdin.read(1).lower()
+                                if key == 'q':
+                                    self.running = False
+                                    break
+                            except Exception:
+                                # Ignore any reading errors
+                                pass
                 finally:
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         except Exception as e:
@@ -317,12 +325,22 @@ class ResourceMonitor:
         self.start()
         
         try:
+            console.print("[cyan]Resource monitor running. Press 'q' to exit...[/]")
+            
+            # On Windows, msvcrt might not work well with Rich console
+            # So we'll use the thread-based key checker
             while self.running:
                 self.update_terminal_size()
-                self._display_system_resources()
+                try:
+                    self._display_system_resources()
+                except Exception as e:
+                    console.print(f"[red]Error displaying resources: {str(e)}[/]")
                 time.sleep(self.refresh_interval)
         except KeyboardInterrupt:
-            pass
+            console.print("[yellow]Caught keyboard interrupt, shutting down...[/]")
+        except Exception as e:
+            console.print(f"[bold red]Error in monitor: {str(e)}[/]")
+            traceback.print_exc()
         finally:
             self.stop()
     
@@ -405,7 +423,8 @@ class ResourceMonitor:
                 
             # Calculate width based on percentage
             width = int(cpu / 2)  # Up to 50 characters for 100%
-            bar = f"CPU{i:2d} [{'#' * width}{'.' * (50 - width)}] {cpu:5.1f}%"
+            # Use ASCII characters instead of Unicode
+            bar = f"CPU{i:2d} [{('#' * width)}{('.' * (50 - width))}] {cpu:5.1f}%"
             bars.append(f"[{bar_color}]{bar}[/{bar_color}]")
         
         return bars
@@ -415,10 +434,11 @@ class ResourceMonitor:
         if not data:
             return ""
             
-        # Use Unicode block characters for the sparkline
-        blocks = " ▁▂▃▄▅▆▇█"
+        # Use ASCII characters instead of Unicode blocks for better compatibility
+        # blocks = " ▁▂▃▄▅▆▇█"
+        blocks = " _.,-=+*#@"
         
-        # Normalize data to 0-7 range (for the 8 block characters)
+        # Normalize data to 0-8 range (for the 9 ASCII characters)
         min_val = min(data) if data else 0
         max_val = max(data) if data else 100
         range_val = max_val - min_val
@@ -426,14 +446,14 @@ class ResourceMonitor:
         if range_val == 0:
             normalized = [1] * len(data)  # Avoid division by zero
         else:
-            normalized = [int(7 * (x - min_val) / range_val) for x in data]
+            normalized = [int(8 * (x - min_val) / range_val) for x in data]
         
         # Trim to width
         if len(normalized) > width:
             normalized = normalized[-width:]
         
         # Create the sparkline
-        line = ''.join(blocks[n+1] for n in normalized)
+        line = ''.join(blocks[n] for n in normalized)
         
         return line
     
@@ -647,8 +667,10 @@ class ResourceMonitor:
                     bar_color = "red"
                 
                 # Calculate width based on percentage and terminal width
-                width = min(int((self.terminal_width - 20) * cpu / 100), self.terminal_width - 20)
-                bar = f"CPU{i:2d} [{'#' * width}{' ' * (self.terminal_width - 20 - width)}] {cpu:5.1f}%"
+                max_bar_width = self.terminal_width - 20
+                width = min(int((max_bar_width * cpu) / 100), max_bar_width)
+                # Use ASCII characters for the bar
+                bar = f"CPU{i:2d} [{'#' * width}{' ' * (max_bar_width - width)}] {cpu:5.1f}%"
                 console.print(f"[{bar_color}]{bar}[/{bar_color}]")
             
             console.print()
