@@ -33,6 +33,7 @@ import asyncio
 import shutil
 from typing import List, Dict, Any, Optional, Set, Union, Tuple
 from datetime import datetime, timedelta
+import traceback
 
 import typer
 from rich.console import Console, Group
@@ -248,67 +249,82 @@ class DockerCommandCompleter(Completer):
 class ResourceMonitor:
     """Monitor system and Docker resource usage"""
     
-    def __init__(self):
-        self.running = True
-        self.refresh_interval = 2.0  # seconds
-        self.containers = []
-        self.system_stats = {}
-        self.container_stats = {}
-        self.term_size = shutil.get_terminal_size()
+    def __init__(self, refresh_interval=1.0):
+        self.refresh_interval = refresh_interval
+        self.running = False
         self._key_thread = None
+        self.terminal_width = shutil.get_terminal_size().columns
+        self.terminal_height = shutil.get_terminal_size().lines
+        # Historical data for graphs
+        self.historical_cpu = []
+        self.historical_mem = []
+        self.max_history = 60  # Store up to 60 data points
+        self.container_stats = {}
     
     def stop(self):
-        """Stop the monitoring"""
+        """Stop monitoring and clean up resources"""
         self.running = False
         if self._key_thread and self._key_thread.is_alive():
-            self._key_thread.join(timeout=1.0)
+            self._key_thread.join()
     
     def update_terminal_size(self):
-        """Update the terminal size."""
-        self.term_size = shutil.get_terminal_size()
+        """Update terminal size dimensions"""
+        self.terminal_width = shutil.get_terminal_size().columns
+        self.terminal_height = shutil.get_terminal_size().lines
     
     def _watch_key_presses(self):
-        """Watch for key presses to handle user input"""
-        import msvcrt
-        
-        while self.running:
-            if msvcrt.kbhit():
-                key = msvcrt.getch()
-                # Handle key press
-                if key == b'q':  # 'q' key for quit
-                    self.stop()
-                    break
-            time.sleep(0.1)
-
+        """Thread function to watch for key presses to exit"""
+        try:
+            # Set terminal to unbuffered mode
+            if os.name == 'nt':
+                import msvcrt
+                while self.running:
+                    if msvcrt.kbhit():
+                        key = msvcrt.getch().decode('utf-8').lower()
+                        if key == 'q':
+                            self.running = False
+                            break
+                    time.sleep(0.1)
+            else:
+                import tty
+                import termios
+                import sys
+                fd = sys.stdin.fileno()
+                old_settings = termios.tcgetattr(fd)
+                try:
+                    tty.setraw(fd)
+                    while self.running:
+                        if select.select([sys.stdin], [], [], 0.1)[0]:
+                            key = sys.stdin.read(1).lower()
+                            if key == 'q':
+                                self.running = False
+                                break
+                finally:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except Exception as e:
+            console.print(f"[red]Error in key watcher: {str(e)}[/]")
+    
     def start(self):
-        """Start the key press watcher in a separate thread"""
+        """Start monitoring and setup key watcher"""
+        self.running = True
+        # Start the key watcher thread
         self._key_thread = threading.Thread(target=self._watch_key_presses)
         self._key_thread.daemon = True
         self._key_thread.start()
     
     def run(self):
-        """Run the resource monitor"""
-        # Clear screen
-        print("\033c", end="")
-        
-        # Start key press watcher thread
+        """Run the resource monitor until stopped"""
         self.start()
-        
-        print("Resource Monitor - Press 'q' to exit")
-        print("=" * 80)
         
         try:
             while self.running:
                 self.update_terminal_size()
-                self.update_stats()
-                self.display_stats()
+                self._display_system_resources()
                 time.sleep(self.refresh_interval)
         except KeyboardInterrupt:
             pass
         finally:
             self.stop()
-            # Clear screen again
-            print("\033c", end="")
     
     def _get_cpu_cores_usage(self):
         """Get CPU usage per core"""
@@ -581,6 +597,117 @@ class ResourceMonitor:
                 
                 time.sleep(1)
 
+    def _display_system_resources(self):
+        """Display system resources in a formatted way"""
+        try:
+            # Clear the screen
+            os.system('cls' if os.name == 'nt' else 'clear')
+            
+            # Get system stats
+            cpu_percent = psutil.cpu_percent()
+            cpu_cores = self._get_cpu_cores_usage()
+            memory = psutil.virtual_memory()
+            swap = psutil.swap_memory()
+            disk = psutil.disk_usage('/')
+            net_stats = self._get_network_stats()
+            disk_io = self._get_disk_io_stats()
+            
+            # Update historical data
+            self.historical_cpu.append(cpu_percent)
+            if len(self.historical_cpu) > self.max_history:
+                self.historical_cpu = self.historical_cpu[-self.max_history:]
+                
+            self.historical_mem.append(memory.percent)
+            if len(self.historical_mem) > self.max_history:
+                self.historical_mem = self.historical_mem[-self.max_history:]
+            
+            # Get container stats
+            containers = self._get_container_stats()
+            
+            # Create console output
+            console = Console()
+            
+            # Create header
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            console.print(f"[bold {THEME['title_color']}]{THEME['app_title']} Resource Monitor - {now}[/]")
+            console.print("Press 'q' to exit safely", style="bold yellow")
+            console.print()
+            
+            # CPU section
+            console.print("[bold]CPU Usage[/]")
+            console.print(f"Total CPU: {cpu_percent}%")
+            console.print(f"CPU History: {self._create_sparkline(self.historical_cpu)}")
+            
+            # Display per-core usage
+            for i, cpu in enumerate(cpu_cores):
+                bar_color = "green"
+                if cpu > 60:
+                    bar_color = "yellow"
+                if cpu > 85:
+                    bar_color = "red"
+                
+                # Calculate width based on percentage and terminal width
+                width = min(int((self.terminal_width - 20) * cpu / 100), self.terminal_width - 20)
+                bar = f"CPU{i:2d} [{'#' * width}{' ' * (self.terminal_width - 20 - width)}] {cpu:5.1f}%"
+                console.print(f"[{bar_color}]{bar}[/{bar_color}]")
+            
+            console.print()
+            
+            # Memory section
+            console.print("[bold]Memory Usage[/]")
+            memory_used_gb = memory.used / (1024 * 1024 * 1024)
+            memory_total_gb = memory.total / (1024 * 1024 * 1024)
+            console.print(f"Memory: {memory.percent}% ({memory_used_gb:.1f}GB / {memory_total_gb:.1f}GB)")
+            console.print(f"Memory History: {self._create_sparkline(self.historical_mem)}")
+            console.print(f"Swap: {swap.percent}% ({swap.used / (1024*1024*1024):.1f}GB / {swap.total / (1024*1024*1024):.1f}GB)")
+            console.print()
+            
+            # Disk section
+            console.print("[bold]Disk Usage[/]")
+            console.print(f"Disk: {disk.percent}% ({disk.used / (1024*1024*1024):.1f}GB / {disk.total / (1024*1024*1024):.1f}GB)")
+            if disk_io:
+                console.print(f"Read: {disk_io.get('read_bytes', 0) / (1024*1024):.1f}MB, Write: {disk_io.get('write_bytes', 0) / (1024*1024):.1f}MB")
+            console.print()
+            
+            # Network section
+            console.print("[bold]Network Usage[/]")
+            console.print(f"Sent: {net_stats['bytes_sent'] / (1024*1024):.1f}MB ({net_stats['packets_sent']} packets)")
+            console.print(f"Received: {net_stats['bytes_recv'] / (1024*1024):.1f}MB ({net_stats['packets_recv']} packets)")
+            console.print()
+            
+            # Docker containers section
+            console.print(f"[bold]Docker Containers ({len(containers)})[/]")
+            if containers:
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("Name", style="cyan")
+                table.add_column("CPU%", justify="right", style="green")
+                table.add_column("Mem Usage", justify="right", style="yellow")
+                table.add_column("Mem%", justify="right", style="yellow")
+                table.add_column("Net I/O", style="blue")
+                table.add_column("Block I/O", style="magenta")
+                table.add_column("PIDs", justify="right", style="dim")
+                
+                for container in containers:
+                    table.add_row(
+                        container['name'],
+                        f"{container['cpu']:.1f}%",
+                        container['memory_usage'],
+                        f"{container['memory_percent']:.1f}%",
+                        container['network_io'],
+                        container['block_io'],
+                        str(container['pids'])
+                    )
+                console.print(table)
+            else:
+                console.print("[yellow]No running containers[/]")
+            
+            console.print("\n[bold yellow]Press 'q' to exit the monitor[/]")
+            
+        except Exception as e:
+            console = Console()
+            console.print(f"[bold red]Error displaying resources: {str(e)}[/]")
+            traceback.print_exc()
+
 # Helper functions
 def run_docker_command(command: List[str], show_output: bool = True) -> str:
     with Progress(
@@ -804,38 +931,13 @@ def system_rebalance():
 
 @system_app.command("monitor")
 def system_monitor():
-    """Monitor system and container resources"""
-    console.print("[bold cyan]Starting resource monitor. Press 'q' to exit safely, or CTRL+C to force exit.[/]")
+    """Monitor system resources"""
+    console.print("[bold cyan]Starting system resource monitor. Press 'q' to exit safely, or CTRL+C to force exit.[/]")
     
-    # Create and start the monitor
     monitor = ResourceMonitor()
-    monitor.start()
-    
     try:
-        # Set up a custom input loop that won't block the display
-        # but will check for the 'q' key to exit gracefully
-        import threading
-        import msvcrt
-        
-        exit_event = threading.Event()
-        
-        def check_for_exit_key():
-            while not exit_event.is_set():
-                if msvcrt.kbhit():
-                    key = msvcrt.getch().decode('utf-8').lower()
-                    if key == 'q':
-                        exit_event.set()
-                time.sleep(0.1)
-        
-        key_thread = threading.Thread(target=check_for_exit_key)
-        key_thread.daemon = True
-        key_thread.start()
-        
-        # Wait until exit event is set
-        while not exit_event.is_set():
-            time.sleep(0.5)
-            
-        console.print("[yellow]Exiting monitor...[/]")
+        # Run the monitor
+        monitor.run()
     except KeyboardInterrupt:
         console.print("[yellow]Forced exit of monitor...[/]")
     except Exception as e:
@@ -883,50 +985,14 @@ def status():
 
 @app.command()
 def monitor():
-    """Monitor system and container resources"""
-    monitor = ResourceMonitor()
-    
-    # Header
-    console.print("[bold]Docker Orchestration Resource Monitor[/]")
-    console.print("[dim]Press 'q' to exit the monitor view.[/]")
-    console.print()
-    
-    try:
-        monitor.run()
-    except Exception as e:
-        console.print(f"[bold red]Error in monitor: {str(e)}[/]")
-    
+    """Monitor system resources including CPU, memory, disk, and network"""
     console.print("[bold cyan]Starting resource monitor. Press 'q' to exit safely, or CTRL+C to force exit.[/]")
     
     # Create and start the monitor
     monitor = ResourceMonitor()
-    monitor.start()
-    
     try:
-        # Set up a custom input loop that won't block the display
-        # but will check for the 'q' key to exit gracefully
-        import threading
-        import msvcrt
-        
-        exit_event = threading.Event()
-        
-        def check_for_exit_key():
-            while not exit_event.is_set():
-                if msvcrt.kbhit():
-                    key = msvcrt.getch().decode('utf-8').lower()
-                    if key == 'q':
-                        exit_event.set()
-                time.sleep(0.1)
-        
-        key_thread = threading.Thread(target=check_for_exit_key)
-        key_thread.daemon = True
-        key_thread.start()
-        
-        # Wait until exit event is set
-        while not exit_event.is_set():
-            time.sleep(0.5)
-            
-        console.print("[yellow]Exiting monitor...[/]")
+        # Run the monitor
+        monitor.run()
     except KeyboardInterrupt:
         console.print("[yellow]Forced exit of monitor...[/]")
     except Exception as e:
@@ -944,47 +1010,21 @@ def logs(container: str = typer.Argument(None, help="Container name to view logs
 
 @app.command()
 def start(container: str = typer.Argument(None, help="Container name to start"),
-          wait: bool = typer.Option(False, "--wait", "-w", help="Wait for container to start")):
-    """Start a Docker container"""
-    if not container:
-        container_choice = questionary.select(
-            "What do you want to start?",
-            choices=["Existing container", "New container from image"],
-            style=custom_style
-        ).ask()
-        
-        if container_choice == "Existing container":
-            container = select_containers(message="Select container to start:")
-            if not container:
-                return
-        elif container_choice == "New container from image":
-            # Get image to use
-            image = questionary.text(
-                "Enter image name (e.g. ubuntu:latest):",
-                style=custom_style
-            ).ask()
-            
-            if not image:
-                console.print("[yellow]No image specified. Operation cancelled.[/]")
-                return
-                
-            container = questionary.text(
-                "Enter new container name:",
-                style=custom_style
-            ).ask()
-            
-            if not container:
-                console.print("[yellow]No container name specified. Operation cancelled.[/]")
-                return
-                
-            # Create and start a container from the image
-            # This will automatically handle pulling if needed
-            start_container_from_image(container, image, wait)
-            return
-        else:
-            return
+          wait: bool = typer.Option(False, "--wait", "-w", help="Wait for container to exit"),
+          interactive: bool = typer.Option(False, "--interactive", "-i", help="Start in interactive mode")):
+    """
+    Start a container by name. If the container doesn't exist, it will attempt to:
+    1. Create a container with that name from an image with the same name if it exists locally
+    2. Pull the image with that name from a registry if it doesn't exist locally
+    """
+    if interactive:
+        interactive_mode()
+        return
     
-    # Try API first if available
+    if not container:
+        console.print("[bold red]Error:[/] Container name is required")
+        return
+    
     api_available = True
     task_id = None
     
@@ -996,7 +1036,31 @@ def start(container: str = typer.Argument(None, help="Container name to start"),
     
     # If container doesn't exist, try to create it from an image with the same name
     if returncode != 0:
-        console.print(f"[yellow]Container {container} does not exist. Attempting to create it from image {container}...[/]")
+        console.print(f"[yellow]Container {container} does not exist.[/]")
+        
+        # Check if image exists locally
+        returncode, stdout, stderr = run_command_with_spinner(
+            "docker", ["image", "inspect", container],
+            f"Checking if image {container} exists locally..."
+        )
+        
+        if returncode != 0:
+            console.print(f"[yellow]Image {container} not found locally. Pulling from registry...[/]")
+            
+            # Try to pull the image from registry
+            pull_code, pull_out, pull_err = run_command_with_spinner(
+                "docker", ["pull", container],
+                f"Pulling image {container}..."
+            )
+            
+            if pull_code != 0:
+                console.print(f"[bold red]FAILED[/] Failed to pull image {container}")
+                console.print(f"[red]{pull_err}[/]")
+                return
+            else:
+                console.print(f"[bold green]SUCCESS[/] Image {container} pulled successfully")
+        
+        # Now create and start a container from the image
         start_container_from_image(container, container, wait)
         return
     
@@ -1292,19 +1356,85 @@ def container_submenu():
                     console.print("[yellow]No containers found[/]")
             
             elif container_action == "Start Container":
-                # Select a container to start
-                container = select_containers(message="Select container to start:")
-                if container:
-                    # Use direct Docker command
+                # Get container name from user
+                container_name = questionary.text(
+                    "Enter container name to start:",
+                    style=custom_style
+                ).ask()
+                
+                if not container_name:
+                    container = select_containers(message="Or select container to start:")
+                    if container:
+                        container_name = container
+                
+                if container_name:
+                    # Check if container exists
                     returncode, stdout, stderr = run_command_with_spinner(
-                        "docker", ["start", container], 
-                        f"Starting container {container}..."
+                        "docker", ["container", "inspect", container_name],
+                        f"Checking if container {container_name} exists..."
+                    )
+                    
+                    # If container doesn't exist, try to create it from an image
+                    if returncode != 0:
+                        console.print(f"[yellow]Container {container_name} does not exist.[/]")
+                        
+                        # Check if image exists locally
+                        returncode, stdout, stderr = run_command_with_spinner(
+                            "docker", ["image", "inspect", container_name],
+                            f"Checking if image {container_name} exists locally..."
+                        )
+                        
+                        if returncode != 0:
+                            console.print(f"[yellow]Image {container_name} not found locally. Pulling from registry...[/]")
+                            
+                            # Try to pull the image from registry
+                            pull_code, pull_out, pull_err = run_command_with_spinner(
+                                "docker", ["pull", container_name],
+                                f"Pulling image {container_name}..."
+                            )
+                            
+                            if pull_code != 0:
+                                console.print(f"[bold red]✗[/] Failed to pull image {container_name}")
+                                console.print(f"[red]{pull_err}[/]")
+                            else:
+                                console.print(f"[bold green]✓[/] Image {container_name} pulled successfully")
+                                
+                                # Create a container from the image
+                                create_code, create_out, create_err = run_command_with_spinner(
+                                    "docker", ["create", "--name", container_name, container_name],
+                                    f"Creating container {container_name}..."
+                                )
+                                
+                                if create_code != 0:
+                                    console.print(f"[bold red]✗[/] Failed to create container {container_name}")
+                                    console.print(f"[red]{create_err}[/]")
+                                else:
+                                    console.print(f"[bold green]✓[/] Container {container_name} created successfully")
+                        else:
+                            console.print(f"[green]Image {container_name} found locally[/]")
+                            
+                            # Create a container from the existing image
+                            create_code, create_out, create_err = run_command_with_spinner(
+                                "docker", ["create", "--name", container_name, container_name],
+                                f"Creating container {container_name}..."
+                            )
+                            
+                            if create_code != 0:
+                                console.print(f"[bold red]✗[/] Failed to create container {container_name}")
+                                console.print(f"[red]{create_err}[/]")
+                            else:
+                                console.print(f"[bold green]✓[/] Container {container_name} created successfully")
+                    
+                    # Now start the container (either existing or newly created)
+                    returncode, stdout, stderr = run_command_with_spinner(
+                        "docker", ["start", container_name], 
+                        f"Starting container {container_name}..."
                     )
                     
                     if returncode == 0:
-                        console.print(f"[bold green]✓[/] Container {container} started successfully")
+                        console.print(f"[bold green]✓[/] Container {container_name} started successfully")
                     else:
-                        console.print(f"[bold red]✗[/] Failed to start container {container}")
+                        console.print(f"[bold red]✗[/] Failed to start container {container_name}")
                         if stderr:
                             console.print(f"[red]{stderr}[/]")
             
