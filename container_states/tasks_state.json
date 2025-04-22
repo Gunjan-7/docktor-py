@@ -1,0 +1,22 @@
+{
+  "task_1745258537_511": {
+    "id": "task_1745258537_511",
+    "name": "Shishir",
+    "priority": "medium",
+    "resources": {
+      "cpu_shares": 4096,
+      "memory": "8192m",
+      "memory_swap": "16384m"
+    },
+    "dockerfile_path": null,
+    "dockerfile_content": null,
+    "compose_path": null,
+    "compose_content": null,
+    "container_id": null,
+    "state": "running",
+    "checkpoint_path": null,
+    "created_at": 1745258537.4670575,
+    "started_at": 1745258539.180855,
+    "completed_at": null
+  }
+}
