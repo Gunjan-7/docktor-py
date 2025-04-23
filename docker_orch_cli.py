@@ -129,6 +129,36 @@ def _(event):
     """Exit when Control-C is pressed."""
     event.app.exit()
 
+@kb.add('c-b')
+def _(event):
+    """Add keyboard shortcut for going back (Ctrl+B)"""
+    # This will be picked up by interactive commands that support navigation
+    event.app.exit(result={'action': 'back'})
+
+@kb.add('c-f')
+def _(event):
+    """Add keyboard shortcut for going forward (Ctrl+F)"""
+    # This will be picked up by interactive commands that support navigation
+    event.app.exit(result={'action': 'forward'})
+
+@kb.add('c-h')
+def _(event):
+    """Add keyboard shortcut for help (Ctrl+H)"""
+    # Display a help screen or panel
+    event.app.exit(result={'action': 'help'})
+
+@kb.add('c-s')
+def _(event):
+    """Add keyboard shortcut for saving (Ctrl+S)"""
+    # Signal that the user wants to save
+    event.app.exit(result={'action': 'save'})
+
+@kb.add('c-r')
+def _(event):
+    """Add keyboard shortcut for refreshing (Ctrl+R)"""
+    # Signal that the user wants to refresh/reload
+    event.app.exit(result={'action': 'refresh'})
+
 # Docker command autocomplete
 class DockerCommandCompleter(Completer):
     """Advanced completer for Docker commands and resources"""
@@ -282,7 +312,7 @@ class ResourceMonitor:
                     if msvcrt.kbhit():
                         try:
                             key = msvcrt.getch().decode('utf-8', errors='replace').lower()
-                            if key == 'q':
+                            if key == 'q' or key == '\x1b':  # q or ESC key
                                 self.running = False
                                 break
                         except Exception:
@@ -301,7 +331,7 @@ class ResourceMonitor:
                         if select.select([sys.stdin], [], [], 0.1)[0]:
                             try:
                                 key = sys.stdin.read(1).lower()
-                                if key == 'q':
+                                if key == 'q' or key == '\x1b':  # q or ESC key
                                     self.running = False
                                     break
                             except Exception:
@@ -325,7 +355,7 @@ class ResourceMonitor:
         self.start()
         
         try:
-            console.print("[cyan]Resource monitor running. Press 'q' to exit...[/]")
+            console.print("[cyan]Resource monitor running. Press 'q' or ESC to exit...[/]")
             
             # On Windows, msvcrt might not work well with Rich console
             # So we'll use the thread-based key checker
@@ -336,6 +366,9 @@ class ResourceMonitor:
                 except Exception as e:
                     console.print(f"[red]Error displaying resources: {str(e)}[/]")
                 time.sleep(self.refresh_interval)
+            
+            # Display exit message when user presses 'q'
+            console.print("[yellow]Exiting monitor...[/]")
         except KeyboardInterrupt:
             console.print("[yellow]Caught keyboard interrupt, shutting down...[/]")
         except Exception as e:
@@ -954,7 +987,7 @@ def system_rebalance():
 @system_app.command("monitor")
 def system_monitor():
     """Monitor system resources"""
-    console.print("[bold cyan]Starting system resource monitor. Press 'q' to exit safely, or CTRL+C to force exit.[/]")
+    console.print("[bold cyan]Starting system resource monitor. Press 'q' or ESC to exit safely, or CTRL+C to force exit.[/]")
     
     monitor = ResourceMonitor()
     try:
@@ -1008,7 +1041,7 @@ def status():
 @app.command()
 def monitor():
     """Monitor system resources including CPU, memory, disk, and network"""
-    console.print("[bold cyan]Starting resource monitor. Press 'q' to exit safely, or CTRL+C to force exit.[/]")
+    console.print("[bold cyan]Starting resource monitor. Press 'q' or ESC to exit safely, or CTRL+C to force exit.[/]")
     
     # Create and start the monitor
     monitor = ResourceMonitor()
@@ -1076,15 +1109,31 @@ def start(container: str = typer.Argument(None, help="Container name to start"),
             )
             
             if pull_code != 0:
-                console.print(f"[bold red]FAILED[/] Failed to pull image {container}")
-                console.print(f"[red]{pull_err}[/]")
-                return
+                # Try to pull with latest tag
+                console.print(f"[yellow]Failed to pull image {container}. Trying {container}:latest...[/]")
+                pull_code, pull_out, pull_err = run_command_with_spinner(
+                    "docker", ["pull", f"{container}:latest"],
+                    f"Pulling image {container}:latest..."
+                )
+                
+                if pull_code != 0:
+                    console.print(f"[bold red]FAILED[/] Failed to pull image {container}")
+                    console.print(f"[red]{pull_err}[/]")
+                    return
+                else:
+                    container_image = f"{container}:latest"
+                    console.print(f"[bold green]SUCCESS[/] Image {container_image} pulled successfully")
             else:
+                container_image = container
                 console.print(f"[bold green]SUCCESS[/] Image {container} pulled successfully")
-        
-        # Now create and start a container from the image
-        start_container_from_image(container, container, wait)
-        return
+            
+            # Now create and start a container from the image
+            start_container_from_image(container, container_image, wait)
+            return
+        else:
+            # Now create and start a container from the image
+            start_container_from_image(container, container, wait)
+            return
     
     # Start the existing container
     with console.status(f"[bold blue]Starting container {container}...", spinner="dots"):
@@ -1202,6 +1251,7 @@ def interactive():
     """Start interactive mode with a modern UI"""
     console.print(f"[bold {THEME['title_color']}]{THEME['app_title']} Interactive Mode[/]")
     console.print("[cyan]Use arrow keys to navigate, Enter to select, Ctrl+C to exit[/]")
+    console.print("[cyan]Press Ctrl+H at any time to display keyboard shortcuts help[/]")
     
     # Check API connection
     with console.status("[bold blue]Checking API connection...", spinner="dots"):
@@ -1221,101 +1271,38 @@ def interactive():
     )
     
     while True:
-        # Main menu choices depend on API availability
-        choices = [
-            {"name": "Container Management", "value": "container"},
-            {"name": "Monitor Resources", "value": "monitor"},
-            {"name": "Exit", "value": "exit"}
-        ]
-        
-        # Add orchestration-specific options only if API is available
-        if api_available:
-            # Insert these at position 1 (after Container Management)
-            choices.insert(1, {"name": "Task Management", "value": "task"})
-            choices.insert(2, {"name": "System Management", "value": "system"})
-        
-        # Insert View Logs at position before last (before Exit)
-        choices.insert(len(choices)-1, {"name": "View Logs", "value": "logs"})
-        
-        # Main menu
-        action = questionary.select(
-            "Select an action:",
-            choices=choices,
-            style=custom_style
-        ).ask()
-        
-        if action == "exit" or action is None:
+        try:
+            main_action = questionary.select(
+                "Docker Orchestration CLI:",
+                choices=[
+                    "Container Management",
+                    "Task Management",
+                    "System Management",
+                    "Help & Keyboard Shortcuts",
+                    "Exit"
+                ],
+                style=custom_style
+            ).ask()
+            
+            if main_action == "Exit" or main_action is None:
+                break
+            
+            if main_action == "Container Management":
+                container_submenu()
+            
+            elif main_action == "Task Management":
+                task_submenu()
+            
+            elif main_action == "System Management":
+                system_submenu()
+            
+            elif main_action == "Help & Keyboard Shortcuts":
+                display_keyboard_shortcuts()
+                
+        except KeyboardInterrupt:
             break
-        
-        if action == "container":
-            # Container management submenu - available in all modes
-            container_submenu()
-        
-        elif action == "task" and api_available:
-            # Task management submenu - only available with API
-            task_submenu()
-        
-        elif action == "system" and api_available:
-            # System management submenu - only available with API
-            system_submenu()
-        
-        elif action == "logs":
-            try:
-                # Log viewing - available in all modes
-                container = select_containers(message="Select container to view logs:")
-                if container:
-                    follow = questionary.confirm("Follow logs in real-time?", default=False, style=custom_style).ask()
-                    tail = questionary.text(
-                        "Number of lines to show:",
-                        default="100",
-                        validate=lambda text: text.isdigit(),
-                        style=custom_style
-                    ).ask()
-                    
-                    if follow:
-                        # Stream logs in real-time
-                        console.print(f"[cyan]Streaming logs for container {container}. Press Ctrl+C to stop.[/]")
-                        try:
-                            run_command_with_live_output("docker", ["logs", "--follow", f"--tail={tail}", container])
-                        except KeyboardInterrupt:
-                            console.print("[yellow]Stopped log streaming[/]")
-                    else:
-                        # Get logs
-                        returncode, stdout, stderr = run_command_with_spinner(
-                            "docker", ["logs", f"--tail={tail}", container], 
-                            f"Fetching logs for {container}..."
-                        )
-                        
-                        if returncode == 0:
-                            # Display logs in a panel with syntax highlighting
-                            log_panel = Panel(
-                                Syntax(stdout, "log", theme="ansi_dark", word_wrap=True),
-                                title=f"Logs for {container}",
-                                border_style=THEME["border_style"],
-                                box=THEME["border"],
-                                padding=(1, 2),
-                                highlight=True
-                            )
-                            console.print(log_panel)
-                        else:
-                            console.print(f"[bold red]Error fetching logs: {stderr}[/]")
-                    
-                    # Wait for user to press Enter before returning to menu
-                    console.print("\n[dim]Press Enter to continue...[/]", end="")
-                    input()
-            except Exception as e:
-                console.print(f"[bold red]Error: {str(e)}[/]")
-                console.print("\n[dim]Press Enter to continue...[/]", end="")
-                input()
-        
-        elif action == "monitor":
-            # Monitoring - available in all modes
-            try:
-                monitor()
-            except Exception as e:
-                console.print(f"[bold red]Error: {str(e)}[/]")
-                console.print("\n[dim]Press Enter to continue...[/]", end="")
-                input()
+    
+    console.print("[bold green]Thank you for using Docker Orchestration CLI![/]")
 
 @app.command()
 def start_api_server():
@@ -1348,6 +1335,7 @@ def container_submenu():
             "Container Management:",
             choices=[
                 "List Containers",
+                "Create Container",
                 "Start Container",
                 "Stop Container",
                 "Restart Container",
@@ -1376,6 +1364,11 @@ def container_submenu():
                         console.print(f"[bold red]Error listing containers: {stderr}[/]")
                 else:
                     console.print("[yellow]No containers found[/]")
+            
+            elif container_action == "Create Container":
+                # Launch the container creation wizard
+                console.print("[bold blue]Launching Container Creation Wizard...[/]")
+                create_container_wizard()
             
             elif container_action == "Start Container":
                 # Get container name from user
@@ -1553,23 +1546,77 @@ def task_submenu():
         if task_action == "Back to Main Menu" or task_action is None:
             break
         
-        if task_action == "List Tasks":
-            task_list()
+        try:
+            if task_action == "List Tasks":
+                # Get task filter
+                status_filter = questionary.select(
+                    "Filter tasks by status:",
+                    choices=[
+                        "All Tasks",
+                        "Pending Tasks",
+                        "Running Tasks",
+                        "Paused Tasks",
+                        "Completed Tasks",
+                        "Failed Tasks"
+                    ],
+                    style=custom_style
+                ).ask()
+                
+                filter_value = None
+                if status_filter != "All Tasks":
+                    filter_value = status_filter.split()[0].lower()
+                
+                task_list(status=filter_value)
+            
+            elif task_action == "Create New Task":
+                task_create()
+            
+            elif task_action == "Start Task":
+                task_start()
+            
+            elif task_action == "Stop Task":
+                # Add confirmation for checkpoint
+                task_id = questionary.text(
+                    "Enter Task ID to stop:",
+                    style=custom_style
+                ).ask()
+                
+                if task_id:
+                    checkpoint = questionary.confirm(
+                        "Checkpoint the task before stopping?",
+                        default=True,
+                        style=custom_style
+                    ).ask()
+                    
+                    task_stop(task_id, checkpoint=checkpoint)
+            
+            elif task_action == "Resume Task":
+                task_resume()
+            
+            elif task_action == "Delete Task":
+                # Add confirmation for deletion
+                task_id = questionary.text(
+                    "Enter Task ID to delete:",
+                    style=custom_style
+                ).ask()
+                
+                if task_id:
+                    confirm = questionary.confirm(
+                        f"Are you sure you want to delete task {task_id}?",
+                        default=False,
+                        style=custom_style
+                    ).ask()
+                    
+                    if confirm:
+                        task_delete(task_id)
+                    else:
+                        console.print("[yellow]Task deletion cancelled[/]")
+        except Exception as e:
+            console.print(f"[bold red]Error: {str(e)}[/]")
         
-        elif task_action == "Create New Task":
-            task_create()
-        
-        elif task_action == "Start Task":
-            task_start()
-        
-        elif task_action == "Stop Task":
-            task_stop()
-        
-        elif task_action == "Resume Task":
-            task_resume()
-        
-        elif task_action == "Delete Task":
-            task_delete()
+        # Wait for user to press Enter before returning to menu
+        console.print("\n[dim]Press Enter to continue...[/]", end="")
+        input()
 
 def system_submenu():
     """System management submenu"""
@@ -1578,8 +1625,10 @@ def system_submenu():
             "System Management:",
             choices=[
                 "System Status",
+                "Resource Monitor",
                 "Rebalance Resources",
                 "Scheduler Control",
+                "Help & Shortcuts",
                 "Back to Main Menu"
             ],
             style=custom_style
@@ -1588,23 +1637,60 @@ def system_submenu():
         if system_action == "Back to Main Menu" or system_action is None:
             break
         
-        if system_action == "System Status":
-            system_status()
-        
-        elif system_action == "Rebalance Resources":
-            system_rebalance()
-        
-        elif system_action == "Scheduler Control":
-            scheduler_action = questionary.select(
-                "Scheduler Action:",
-                choices=["Start Scheduler", "Stop Scheduler"],
-                style=custom_style
-            ).ask()
+        try:
+            if system_action == "System Status":
+                system_status()
             
-            if scheduler_action == "Start Scheduler":
-                scheduler_control("start")
-            elif scheduler_action == "Stop Scheduler":
-                scheduler_control("stop")
+            elif system_action == "Resource Monitor":
+                console.print("[bold cyan]Starting resource monitor. Press 'q' or ESC to exit safely, or CTRL+C to force exit.[/]")
+                monitor = ResourceMonitor()
+                try:
+                    monitor.run()
+                except KeyboardInterrupt:
+                    console.print("[yellow]Forced exit of monitor...[/]")
+                except Exception as e:
+                    console.print(f"[bold red]Error in monitor: {str(e)}[/]")
+                finally:
+                    monitor.stop()
+                    console.print("[green]Resource monitor stopped successfully[/]")
+            
+            elif system_action == "Rebalance Resources":
+                confirm = questionary.confirm(
+                    "Are you sure you want to rebalance system resources?",
+                    default=True,
+                    style=custom_style
+                ).ask()
+                
+                if confirm:
+                    system_rebalance()
+                else:
+                    console.print("[yellow]Resource rebalance cancelled[/]")
+            
+            elif system_action == "Scheduler Control":
+                scheduler_action = questionary.select(
+                    "Scheduler Action:",
+                    choices=[
+                        "Start Scheduler",
+                        "Stop Scheduler",
+                        "Back"
+                    ],
+                    style=custom_style
+                ).ask()
+                
+                if scheduler_action != "Back":
+                    action = scheduler_action.split()[0].lower()
+                    scheduler_control(action)
+            
+            elif system_action == "Help & Shortcuts":
+                display_keyboard_shortcuts()
+                
+        except Exception as e:
+            console.print(f"[bold red]Error: {str(e)}[/]")
+        
+        # Wait for user to press Enter before returning to menu
+        if system_action != "Resource Monitor" and system_action != "Help & Shortcuts":
+            console.print("\n[dim]Press Enter to continue...[/]", end="")
+            input()
 
 def get_available_containers() -> List[str]:
     """Get list of available containers"""
@@ -2276,6 +2362,819 @@ def task_delete(task_id: str = typer.Argument(None, help="Task ID to delete")):
         console.print(f"[bold red]Error deleting task: {result['error']}[/]")
     else:
         console.print(f"[bold green]✓[/] Task {task_id} deleted successfully")
+
+def select_docker_image():
+    """Interactive Docker image selection with multiple modes"""
+    # First ask which selection mode the user prefers
+    selection_mode = questionary.select(
+        "How would you like to select a Docker image?",
+        choices=[
+            "Type image name directly",
+            "Choose from popular images",
+            "Search Docker Hub"
+        ],
+        style=custom_style
+    ).ask()
+    
+    if selection_mode == "Type image name directly":
+        # Get image name via text input
+        image = questionary.text(
+            "Enter Docker image name (format: name:tag):",
+            style=custom_style
+        ).ask()
+        return image
+    
+    elif selection_mode == "Choose from popular images":
+        # Hardcoded list of popular images
+        popular_images = [
+            "ubuntu:latest",
+            "alpine:latest",
+            "nginx:latest",
+            "python:3.9",
+            "node:14",
+            "mysql:8",
+            "postgres:13",
+            "redis:latest",
+            "mongodb:latest",
+            "Other (type manually)"
+        ]
+        
+        image = questionary.select(
+            "Select an image:",
+            choices=popular_images,
+            style=custom_style
+        ).ask()
+        
+        if image == "Other (type manually)":
+            # Fall back to manual entry
+            image = questionary.text(
+                "Enter Docker image name (format: name:tag):",
+                style=custom_style
+            ).ask()
+        
+        return image
+    
+    elif selection_mode == "Search Docker Hub":
+        # Get search term
+        search_term = questionary.text(
+            "Enter search term:",
+            style=custom_style
+        ).ask()
+        
+        # Execute Docker search
+        with console.status(f"[bold blue]Searching for '{search_term}'...", spinner="dots"):
+            returncode, stdout, stderr = run_command_with_spinner(
+                "docker", ["search", search_term, "--limit", "10"],
+                f"Searching Docker Hub for '{search_term}'..."
+            )
+        
+        if returncode == 0:
+            # Parse results
+            lines = stdout.strip().split('\n')[1:]  # Skip header
+            images = []
+            
+            for line in lines:
+                if line:
+                    parts = line.split()
+                    if parts:
+                        images.append(parts[0])  # First column is image name
+            
+            images.append("Other (type manually)")
+            
+            # Let user select from results
+            image = questionary.select(
+                "Select an image:",
+                choices=images,
+                style=custom_style
+            ).ask()
+            
+            if image == "Other (type manually)":
+                # Fall back to manual entry
+                image = questionary.text(
+                    "Enter Docker image name (format: name:tag):",
+                    style=custom_style
+                ).ask()
+                
+            # If tag not specified, add :latest
+            if ':' not in image:
+                image += ":latest"
+                
+            return image
+        else:
+            console.print("[bold red]Error searching Docker Hub[/]")
+            # Fall back to manual entry
+            image = questionary.text(
+                "Enter Docker image name (format: name:tag):",
+                style=custom_style
+            ).ask()
+            return image
+
+class ConfigPreview:
+    """Class to handle configuration preview and updates"""
+    
+    def __init__(self, config_type="dockerfile"):
+        """Initialize the configuration preview
+        
+        Args:
+            config_type (str): Type of configuration ('dockerfile' or 'compose')
+        """
+        self.config_type = config_type
+        self.config_lines = []
+        self.services = {}  # For storing multiple services in docker-compose
+        self.current_service = "app"  # Default service name
+        self.initialize_default_config()
+    
+    def initialize_default_config(self):
+        """Set up default configuration based on the type"""
+        if self.config_type == "dockerfile":
+            self.config_lines = [
+                "FROM base_image:tag",
+                "WORKDIR /app",
+                "# Commands will be added here",
+                "# Expose ports will be added here",
+                "# Entrypoint will be added here"
+            ]
+        elif self.config_type == "compose":
+            self.services = {
+                "app": {
+                    "image": "base_image:tag",
+                    "ports": [],
+                    "volumes": [],
+                    "environment": {},
+                    "command": ""
+                }
+            }
+            self._regenerate_compose_config()
+    
+    def _regenerate_compose_config(self):
+        """Regenerate the docker-compose config from services data"""
+        self.config_lines = [
+            "version: '3'",
+            "services:"
+        ]
+        
+        # Add each service
+        for service_name, service_config in self.services.items():
+            self.config_lines.append(f"  {service_name}:")
+            self.config_lines.append(f"    image: {service_config['image']}")
+            
+            # Add ports if any
+            if service_config['ports']:
+                self.config_lines.append("    ports:")
+                for port in service_config['ports']:
+                    self.config_lines.append(f"      - \"{port}\"")
+            
+            # Add volumes if any
+            if service_config['volumes']:
+                self.config_lines.append("    volumes:")
+                for volume in service_config['volumes']:
+                    self.config_lines.append(f"      - {volume}")
+            
+            # Add environment if any
+            if service_config['environment']:
+                self.config_lines.append("    environment:")
+                for key, value in service_config['environment'].items():
+                    self.config_lines.append(f"      {key}: {value}")
+            
+            # Add command if specified
+            if service_config['command']:
+                self.config_lines.append(f"    command: {service_config['command']}")
+        
+        # Add networks and volumes configurations
+        self.config_lines.append("# Networks and volumes will be configured here")
+    
+    def add_service(self, service_name):
+        """Add a new service to the docker-compose configuration"""
+        if self.config_type != "compose":
+            return False
+        
+        if service_name in self.services:
+            return False  # Service already exists
+        
+        self.services[service_name] = {
+            "image": "base_image:tag",
+            "ports": [],
+            "volumes": [],
+            "environment": {},
+            "command": ""
+        }
+        
+        self.current_service = service_name
+        self._regenerate_compose_config()
+        return True
+    
+    def set_current_service(self, service_name):
+        """Set the current service for operations"""
+        if self.config_type != "compose" or service_name not in self.services:
+            return False
+        
+        self.current_service = service_name
+        return True
+    
+    def update_base_image(self, image_name):
+        """Update the base image in the configuration"""
+        if self.config_type == "dockerfile":
+            for i, line in enumerate(self.config_lines):
+                if line.startswith("FROM "):
+                    self.config_lines[i] = f"FROM {image_name}"
+                    break
+        elif self.config_type == "compose":
+            # Update the current service's image
+            self.services[self.current_service]["image"] = image_name
+            self._regenerate_compose_config()
+    
+    def add_port(self, container_port, host_port=None):
+        """Add a port mapping to the configuration"""
+        if self.config_type == "dockerfile":
+            # Find the expose ports comment line
+            for i, line in enumerate(self.config_lines):
+                if "# Expose ports" in line:
+                    # Replace comment with actual EXPOSE directive
+                    self.config_lines[i] = f"EXPOSE {container_port}"
+                    break
+        elif self.config_type == "compose":
+            # Add port mapping to the current service
+            port_mapping = f"{host_port}:{container_port}" if host_port else f"{container_port}"
+            if port_mapping not in self.services[self.current_service]["ports"]:
+                self.services[self.current_service]["ports"].append(port_mapping)
+                self._regenerate_compose_config()
+    
+    def add_volume(self, host_path, container_path):
+        """Add a volume mapping to the configuration"""
+        if self.config_type == "dockerfile":
+            # Dockerfile doesn't have volumes in the same way, could add VOLUME directive
+            for i, line in enumerate(self.config_lines):
+                if "# Commands" in line:
+                    # Add VOLUME directive after WORKDIR
+                    self.config_lines.insert(i, f"VOLUME [\"{container_path}\"]")
+                    break
+        elif self.config_type == "compose":
+            # Add volume mapping to the current service
+            volume_mapping = f"{host_path}:{container_path}"
+            if volume_mapping not in self.services[self.current_service]["volumes"]:
+                self.services[self.current_service]["volumes"].append(volume_mapping)
+                self._regenerate_compose_config()
+    
+    def add_command(self, command):
+        """Add a command (RUN, CMD, ENTRYPOINT) to the configuration"""
+        if self.config_type == "dockerfile":
+            for i, line in enumerate(self.config_lines):
+                if "# Commands" in line:
+                    # Replace comment with actual command
+                    self.config_lines[i] = f"RUN {command}"
+                    break
+        elif self.config_type == "compose":
+            # Set command for the current service
+            self.services[self.current_service]["command"] = command
+            self._regenerate_compose_config()
+    
+    def add_environment_variable(self, key, value):
+        """Add an environment variable to the configuration"""
+        if self.config_type == "dockerfile":
+            # Find a place to insert the ENV directive
+            for i, line in enumerate(self.config_lines):
+                if "# Commands" in line:
+                    # Add ENV directive after commands
+                    self.config_lines.insert(i+1, f"ENV {key}={value}")
+                    break
+        elif self.config_type == "compose":
+            # Add environment variable to the current service
+            self.services[self.current_service]["environment"][key] = value
+            self._regenerate_compose_config()
+    
+    def get_config_as_string(self):
+        """Get the configuration as a formatted string"""
+        return '\n'.join(self.config_lines)
+    
+    def display_config(self):
+        """Display the current configuration in the console"""
+        syntax = "Dockerfile" if self.config_type == "dockerfile" else "YAML"
+        config_text = self.get_config_as_string()
+        
+        # Create a panel with the configuration
+        panel = Panel(
+            Syntax(config_text, syntax, theme="ansi_dark"),
+            title=f"{'Dockerfile' if self.config_type == 'dockerfile' else 'Docker Compose'} Preview",
+            border_style=THEME["border_style"],
+            padding=(1, 2)
+        )
+        
+        console.print(panel)
+
+class NavigationStack:
+    """Navigation stack to keep track of user's navigation through menus"""
+    def __init__(self):
+        self.stack = []
+    
+    def save_step(self, step_id, data=None):
+        """Save the current step to the navigation stack"""
+        if data is None:
+            data = {}
+        self.stack.append({"step_id": step_id, "data": data})
+    
+    def go_back(self):
+        """Go back to the previous step and return its ID"""
+        if len(self.stack) <= 1:
+            return "config_type"  # Default to start if we can't go back further
+        
+        # Remove current step
+        self.stack.pop()
+        
+        # Return the previous step
+        return self.stack[-1]["step_id"]
+    
+    def clear(self):
+        """Clear the navigation stack"""
+        self.stack = []
+    
+    # Legacy methods for backwards compatibility
+    def push(self, screen_id, data=None):
+        """Push a screen onto the stack (legacy method)"""
+        self.save_step(screen_id, data)
+    
+    def back(self):
+        """Go back to the previous screen (legacy method)"""
+        if len(self.stack) <= 1:
+            return None
+        self.stack.pop()
+        return self.stack[-1]
+    
+    def can_go_back(self):
+        """Check if we can go back (legacy method)"""
+        return len(self.stack) > 1
+
+def create_container_wizard():
+    """Interactive wizard for creating Docker container or compose setup"""
+    console.print("[bold]Container Creation Wizard[/bold]", style=THEME["title_style"])
+    
+    # Use the NavigationStack to keep track of steps
+    nav_stack = NavigationStack()
+    
+    # Initialize configuration variables
+    config_preview = None
+    config_type = None
+    container_name = ""
+    service_names = []
+    current_step = "config_type"
+    
+    while True:
+        try:
+            # Handle different steps based on the current_step
+            if current_step == "config_type":
+                nav_stack.save_step(current_step)
+                console.print("Select configuration type:", style=THEME["info_style"])
+                config_type = questionary.select(
+                    "Configuration type:",
+                    choices=["Dockerfile", "Docker Compose", "Cancel"],
+                    style=questionary_style
+                ).ask()
+                
+                if config_type == "Cancel":
+                    console.print("Wizard canceled.", style=THEME["warning_style"])
+                    return
+                
+                config_preview = ConfigPreview("dockerfile" if config_type == "Dockerfile" else "compose")
+                current_step = "container_name" if config_type == "Dockerfile" else "service_setup"
+            
+            elif current_step == "container_name":
+                nav_stack.save_step(current_step)
+                container_name = questionary.text(
+                    "Enter container name:",
+                    style=questionary_style
+                ).ask()
+                
+                if not container_name:
+                    console.print("Container name cannot be empty.", style=THEME["error_style"])
+                    continue
+                
+                current_step = "base_image"
+            
+            elif current_step == "service_setup":
+                nav_stack.save_step(current_step)
+                
+                # For Docker Compose, set up services
+                if not service_names:
+                    # At least add the default 'app' service
+                    service_names.append("app")
+                
+                # Show current services and allow adding more
+                choices = [f"Configure Service: {name}" for name in service_names]
+                choices.append("Add New Service")
+                choices.append("Continue to Image Selection")
+                choices.append("Go Back")
+                
+                service_action = questionary.select(
+                    "Service Setup:",
+                    choices=choices,
+                    style=questionary_style
+                ).ask()
+                
+                if service_action == "Add New Service":
+                    new_service = questionary.text(
+                        "Enter new service name:",
+                        style=questionary_style
+                    ).ask()
+                    
+                    if new_service and new_service not in service_names:
+                        service_names.append(new_service)
+                        config_preview.add_service(new_service)
+                        console.print(f"Added service: {new_service}", style=THEME["success_style"])
+                    continue
+                
+                elif service_action == "Continue to Image Selection":
+                    # Select the first service to configure
+                    config_preview.set_current_service(service_names[0])
+                    current_step = "select_service"
+                
+                elif service_action == "Go Back":
+                    current_step = nav_stack.go_back()
+                
+                else:
+                    # Configure a specific service
+                    selected_service = service_action.replace("Configure Service: ", "")
+                    config_preview.set_current_service(selected_service)
+                    current_step = "select_service"
+            
+            elif current_step == "select_service":
+                nav_stack.save_step(current_step)
+                
+                if len(service_names) > 1:
+                    # Only show this step if there are multiple services
+                    service_to_configure = questionary.select(
+                        "Select service to configure:",
+                        choices=service_names + ["Go Back"],
+                        style=questionary_style
+                    ).ask()
+                    
+                    if service_to_configure == "Go Back":
+                        current_step = nav_stack.go_back()
+                        continue
+                    
+                    config_preview.set_current_service(service_to_configure)
+                
+                # Display the current configuration
+                config_preview.display_config()
+                current_step = "base_image"
+            
+            elif current_step == "base_image":
+                nav_stack.save_step(current_step)
+                
+                # Display current service being configured if in compose mode
+                if config_type == "Docker Compose":
+                    console.print(f"Configuring service: [bold]{config_preview.current_service}[/bold]", 
+                                 style=THEME["info_style"])
+                
+                # Get base image
+                selected_image = select_docker_image()
+                
+                if selected_image == "Go Back":
+                    current_step = nav_stack.go_back()
+                    continue
+                elif not selected_image:
+                    console.print("Base image selection canceled.", style=THEME["warning_style"])
+                    return
+                
+                # Update the config preview with the selected image
+                config_preview.update_base_image(selected_image)
+                config_preview.display_config()
+                
+                current_step = "port_mapping"
+            
+            elif current_step == "port_mapping":
+                nav_stack.save_step(current_step)
+                
+                # Display current service being configured if in compose mode
+                if config_type == "Docker Compose":
+                    console.print(f"Configuring service: [bold]{config_preview.current_service}[/bold]", 
+                                 style=THEME["info_style"])
+                
+                add_port = questionary.confirm(
+                    "Add port mapping?",
+                    style=questionary_style
+                ).ask()
+                
+                if add_port:
+                    container_port = questionary.text(
+                        "Container port:",
+                        style=questionary_style
+                    ).ask()
+                    
+                    host_port = questionary.text(
+                        "Host port (default: same as container port):",
+                        style=questionary_style
+                    ).ask()
+                    
+                    if container_port:
+                        if not host_port:
+                            host_port = container_port
+                        
+                        config_preview.add_port(container_port, host_port)
+                        config_preview.display_config()
+                        
+                        # Ask if user wants to add another port
+                        add_another = questionary.confirm(
+                            "Add another port mapping?",
+                            style=questionary_style
+                        ).ask()
+                        
+                        if add_another:
+                            continue  # Stay on this step
+                
+                current_step = "volume_mapping"
+            
+            elif current_step == "volume_mapping":
+                nav_stack.save_step(current_step)
+                
+                # Display current service being configured if in compose mode
+                if config_type == "Docker Compose":
+                    console.print(f"Configuring service: [bold]{config_preview.current_service}[/bold]", 
+                                 style=THEME["info_style"])
+                
+                add_volume = questionary.confirm(
+                    "Add volume mapping?",
+                    style=questionary_style
+                ).ask()
+                
+                if add_volume:
+                    host_path = questionary.text(
+                        "Host path:",
+                        style=questionary_style
+                    ).ask()
+                    
+                    container_path = questionary.text(
+                        "Container path:",
+                        style=questionary_style
+                    ).ask()
+                    
+                    if host_path and container_path:
+                        config_preview.add_volume(host_path, container_path)
+                        config_preview.display_config()
+                        
+                        # Ask if user wants to add another volume
+                        add_another = questionary.confirm(
+                            "Add another volume mapping?",
+                            style=questionary_style
+                        ).ask()
+                        
+                        if add_another:
+                            continue  # Stay on this step
+                
+                current_step = "environment_variables"
+            
+            elif current_step == "environment_variables":
+                nav_stack.save_step(current_step)
+                
+                # Display current service being configured if in compose mode
+                if config_type == "Docker Compose":
+                    console.print(f"Configuring service: [bold]{config_preview.current_service}[/bold]", 
+                                 style=THEME["info_style"])
+                
+                add_env = questionary.confirm(
+                    "Add environment variable?",
+                    style=questionary_style
+                ).ask()
+                
+                if add_env:
+                    env_key = questionary.text(
+                        "Environment variable key:",
+                        style=questionary_style
+                    ).ask()
+                    
+                    env_value = questionary.text(
+                        "Environment variable value:",
+                        style=questionary_style
+                    ).ask()
+                    
+                    if env_key:
+                        config_preview.add_environment_variable(env_key, env_value)
+                        config_preview.display_config()
+                        
+                        # Ask if user wants to add another environment variable
+                        add_another = questionary.confirm(
+                            "Add another environment variable?",
+                            style=questionary_style
+                        ).ask()
+                        
+                        if add_another:
+                            continue  # Stay on this step
+                
+                current_step = "command"
+            
+            elif current_step == "command":
+                nav_stack.save_step(current_step)
+                
+                # Display current service being configured if in compose mode
+                if config_type == "Docker Compose":
+                    console.print(f"Configuring service: [bold]{config_preview.current_service}[/bold]", 
+                                 style=THEME["info_style"])
+                
+                add_command = questionary.confirm(
+                    "Add command?",
+                    style=questionary_style
+                ).ask()
+                
+                if add_command:
+                    command = questionary.text(
+                        "Command:",
+                        style=questionary_style
+                    ).ask()
+                    
+                    if command:
+                        config_preview.add_command(command)
+                        config_preview.display_config()
+                
+                # For Docker Compose with multiple services
+                if config_type == "Docker Compose" and len(service_names) > 1:
+                    # Ask if user wants to configure another service
+                    current_service_idx = service_names.index(config_preview.current_service)
+                    
+                    if current_service_idx < len(service_names) - 1:
+                        next_service = questionary.confirm(
+                            f"Configure next service ({service_names[current_service_idx + 1]})?",
+                            style=questionary_style
+                        ).ask()
+                        
+                        if next_service:
+                            config_preview.set_current_service(service_names[current_service_idx + 1])
+                            current_step = "base_image"
+                            continue
+                    
+                    # Option to go back to a previous service
+                    edit_service = questionary.confirm(
+                        "Edit a different service?",
+                        style=questionary_style
+                    ).ask()
+                    
+                    if edit_service:
+                        current_step = "select_service"
+                        continue
+                
+                current_step = "review"
+            
+            elif current_step == "review":
+                nav_stack.save_step(current_step)
+                
+                # Final review of the configuration
+                console.print("[bold]Configuration Review:[/bold]", style=THEME["title_style"])
+                config_preview.display_config()
+                
+                # Ask what to do with the configuration
+                choices = [
+                    "Save Configuration",
+                    "Start Over",
+                    "Go Back to Edit",
+                    "Exit Without Saving"
+                ]
+                
+                action = questionary.select(
+                    "What would you like to do?",
+                    choices=choices,
+                    style=questionary_style
+                ).ask()
+                
+                if action == "Save Configuration":
+                    # Save the configuration to file
+                    file_extension = ".dockerfile" if config_type == "Dockerfile" else ".yml"
+                    filename = questionary.text(
+                        f"Enter filename (will be saved with {file_extension} extension):",
+                        style=questionary_style
+                    ).ask()
+                    
+                    if not filename:
+                        filename = "docker_config"
+                    
+                    if not filename.endswith(file_extension):
+                        filename += file_extension
+                    
+                    try:
+                        with open(filename, 'w') as f:
+                            f.write(config_preview.get_config_as_string())
+                        console.print(f"Configuration saved to {filename}", style=THEME["success_style"])
+                        
+                        # If this is a Docker Compose file, ask if user wants to create the containers
+                        if config_type == "Docker Compose":
+                            create_containers = questionary.confirm(
+                                "Create containers from this configuration?",
+                                style=questionary_style
+                            ).ask()
+                            
+                            if create_containers:
+                                run_command_with_spinner(f"docker-compose -f {filename} up -d", 
+                                                        "Starting containers...")
+                        
+                        elif config_type == "Dockerfile" and container_name:
+                            build_image = questionary.confirm(
+                                "Build Docker image from this Dockerfile?",
+                                style=questionary_style
+                            ).ask()
+                            
+                            if build_image:
+                                image_tag = questionary.text(
+                                    "Enter image tag/name:",
+                                    style=questionary_style
+                                ).ask()
+                                
+                                if not image_tag:
+                                    image_tag = container_name
+                                
+                                run_command_with_spinner(f"docker build -t {image_tag} -f {filename} .", 
+                                                        "Building Docker image...")
+                    except Exception as e:
+                        console.print(f"Error saving configuration: {str(e)}", style=THEME["error_style"])
+                    
+                    return
+                
+                elif action == "Start Over":
+                    console.print("Starting over...", style=THEME["warning_style"])
+                    config_preview = None
+                    config_type = None
+                    container_name = ""
+                    service_names = []
+                    nav_stack = NavigationStack()  # Reset navigation
+                    current_step = "config_type"
+                
+                elif action == "Go Back to Edit":
+                    # Jump back to a previous step
+                    edit_choices = ["Container/Service Type", "Base Image", "Port Mapping", 
+                                   "Volume Mapping", "Environment Variables", "Command"]
+                    
+                    if config_type == "Docker Compose":
+                        edit_choices.insert(1, "Service Setup")
+                    elif config_type == "Dockerfile":
+                        edit_choices.insert(1, "Container Name")
+                    
+                    edit_step = questionary.select(
+                        "Which part would you like to edit?",
+                        choices=edit_choices + ["Cancel"],
+                        style=questionary_style
+                    ).ask()
+                    
+                    if edit_step == "Cancel":
+                        current_step = "review"  # Stay on review
+                    elif edit_step == "Container/Service Type":
+                        current_step = "config_type"
+                    elif edit_step == "Container Name":
+                        current_step = "container_name"
+                    elif edit_step == "Service Setup":
+                        current_step = "service_setup"
+                    elif edit_step == "Base Image":
+                        current_step = "base_image"
+                    elif edit_step == "Port Mapping":
+                        current_step = "port_mapping"
+                    elif edit_step == "Volume Mapping":
+                        current_step = "volume_mapping"
+                    elif edit_step == "Environment Variables":
+                        current_step = "environment_variables"
+                    elif edit_step == "Command":
+                        current_step = "command"
+                
+                else:  # Exit Without Saving
+                    console.print("Exiting wizard without saving.", style=THEME["warning_style"])
+                    return
+        
+        except KeyboardInterrupt:
+            console.print("\nOperation canceled by user", style=THEME["warning_style"])
+            return
+        except Exception as e:
+            console.print(f"Error: {str(e)}", style=THEME["error_style"])
+            console.print("Press Enter to continue...")
+            input()
+            
+    return
+
+def display_keyboard_shortcuts():
+    """Display a help panel with keyboard shortcuts"""
+    shortcuts = [
+        ("Ctrl+C", "Exit application"),
+        ("Ctrl+B", "Go back to previous step"),
+        ("Ctrl+F", "Go forward to next step"),
+        ("Ctrl+H", "Show this help screen"),
+        ("Ctrl+S", "Save current configuration"),
+        ("Ctrl+R", "Refresh current view"),
+        ("q", "Exit from monitor views")
+    ]
+    
+    # Create a table for the shortcuts
+    table = Table(title="Keyboard Shortcuts", box=THEME["border"])
+    table.add_column("Shortcut", style="cyan")
+    table.add_column("Description", style="green")
+    
+    for shortcut, description in shortcuts:
+        table.add_row(shortcut, description)
+    
+    # Create a panel with the table
+    panel = Panel(
+        table,
+        title="Keyboard Shortcuts Help",
+        border_style=THEME["border_style"],
+        padding=(1, 2)
+    )
+    
+    console.print(panel)
+    
+    # Wait for user to press Enter before returning
+    console.print("\n[dim]Press Enter to continue...[/]", end="")
+    input()
 
 if __name__ == "__main__":
     # Register signal handler for clean exit
