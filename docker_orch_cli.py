@@ -355,7 +355,13 @@ class ResourceMonitor:
         self.start()
         
         try:
-            console.print("[cyan]Resource monitor running. Press 'q' or ESC to exit...[/]")
+            # Initial clear screen and instructions
+            console.clear()
+            console.print("[bold cyan]Resource Monitor[/]")
+            console.print("[yellow]======================================[/]")
+            console.print("[cyan]Press 'q' or ESC to exit the monitor safely[/]")
+            console.print("[cyan](Using Ctrl+C will exit the entire application)[/]")
+            console.print("[yellow]======================================[/]\n")
             
             # On Windows, msvcrt might not work well with Rich console
             # So we'll use the thread-based key checker
@@ -367,8 +373,9 @@ class ResourceMonitor:
                     console.print(f"[red]Error displaying resources: {str(e)}[/]")
                 time.sleep(self.refresh_interval)
             
-            # Display exit message when user presses 'q'
-            console.print("[yellow]Exiting monitor...[/]")
+            # Clear screen when exiting
+            console.clear()
+            console.print("[bold green]Resource monitor exited successfully[/]")
         except KeyboardInterrupt:
             console.print("[yellow]Caught keyboard interrupt, shutting down...[/]")
         except Exception as e:
@@ -651,117 +658,205 @@ class ResourceMonitor:
                 time.sleep(1)
 
     def _display_system_resources(self):
-        """Display system resources in a formatted way"""
-        try:
-            # Clear the screen
-            os.system('cls' if os.name == 'nt' else 'clear')
+        """Display system resources in the console"""
+        # Clear the console for a fresh display
+        console.clear()
+        
+        # Header with instructions
+        header = Panel(
+            "[bold cyan]Resource Monitor[/] - Press [bold yellow]'q'[/] or [bold yellow]ESC[/] to exit safely",
+            box=THEME["border"],
+            style=THEME["border_style"],
+            padding=(0, 2)
+        )
+        console.print(header)
+        
+        # Get system stats
+        cpu_percent = psutil.cpu_percent()
+        self.historical_cpu.append(cpu_percent)
+        if len(self.historical_cpu) > self.max_history:
+            self.historical_cpu.pop(0)
             
-            # Get system stats
-            cpu_percent = psutil.cpu_percent()
-            cpu_cores = self._get_cpu_cores_usage()
-            memory = psutil.virtual_memory()
-            swap = psutil.swap_memory()
-            disk = psutil.disk_usage('/')
-            net_stats = self._get_network_stats()
-            disk_io = self._get_disk_io_stats()
+        memory = psutil.virtual_memory()
+        self.historical_mem.append(memory.percent)
+        if len(self.historical_mem) > self.max_history:
+            self.historical_mem.pop(0)
             
-            # Update historical data
-            self.historical_cpu.append(cpu_percent)
-            if len(self.historical_cpu) > self.max_history:
-                self.historical_cpu = self.historical_cpu[-self.max_history:]
+        swap = psutil.swap_memory()
+        disk = psutil.disk_usage('/')
+        net_stats = self._get_network_stats()
+        
+        # Get Docker container stats
+        containers = self._get_container_stats()
+        
+        # Create CPU usage panel
+        cpu_bars = self._create_cpu_bars(self._get_cpu_cores_usage())
+        cpu_history = self._create_sparkline(self.historical_cpu, width=min(60, self.terminal_width - 20))
+        
+        cpu_content = [
+            f"[bold]CPU Usage: {cpu_percent:.1f}%[/]",
+            f"CPU History: {cpu_history}",
+            ""
+        ] + cpu_bars
+        
+        cpu_panel = Panel(
+            "\n".join(cpu_content),
+            title="CPU",
+            border_style=THEME["border_style"], 
+            box=THEME["border"]
+        )
+        
+        # Create memory panel
+        mem_used = memory.used / 1_000_000_000  # GB
+        mem_total = memory.total / 1_000_000_000  # GB
+        mem_history = self._create_sparkline(self.historical_mem, width=min(60, self.terminal_width - 20))
+        
+        swap_used = swap.used / 1_000_000_000  # GB
+        swap_total = swap.total / 1_000_000_000  # GB
+        
+        memory_color = "green"
+        if memory.percent > 60:
+            memory_color = "yellow"
+        if memory.percent > 85:
+            memory_color = "red"
+            
+        swap_color = "green"
+        if swap.percent > 60:
+            swap_color = "yellow"
+        if swap.percent > 85:
+            swap_color = "red"
+        
+        mem_content = [
+            f"[bold]Memory Usage: [{memory_color}]{memory.percent:.1f}%[/{memory_color}][/]",
+            f"Memory History: {mem_history}",
+            f"Used: {mem_used:.2f} GB / Total: {mem_total:.2f} GB",
+            "",
+            f"[bold]Swap Usage: [{swap_color}]{swap.percent:.1f}%[/{swap_color}][/]",
+            f"Used: {swap_used:.2f} GB / Total: {swap_total:.2f} GB"
+        ]
+        
+        memory_panel = Panel(
+            "\n".join(mem_content),
+            title="Memory",
+            border_style=THEME["border_style"], 
+            box=THEME["border"]
+        )
+        
+        # Create disk panel
+        disk_color = "green"
+        if disk.percent > 70:
+            disk_color = "yellow"
+        if disk.percent > 90:
+            disk_color = "red"
+            
+        disk_used = disk.used / 1_000_000_000  # GB
+        disk_total = disk.total / 1_000_000_000  # GB
+        
+        disk_content = [
+            f"[bold]Disk Usage (/) : [{disk_color}]{disk.percent:.1f}%[/{disk_color}][/]",
+            f"Used: {disk_used:.2f} GB / Total: {disk_total:.2f} GB"
+        ]
+        
+        # Add disk I/O stats if available
+        disk_io = self._get_disk_io_stats()
+        if disk_io:
+            read_mb = disk_io['read_bytes'] / 1_000_000  # MB
+            write_mb = disk_io['write_bytes'] / 1_000_000  # MB
+            
+            disk_content.extend([
+                "",
+                f"[bold]Disk I/O:[/]",
+                f"Read: {read_mb:.2f} MB ({disk_io['read_count']} operations)",
+                f"Write: {write_mb:.2f} MB ({disk_io['write_count']} operations)",
+            ])
+        
+        disk_panel = Panel(
+            "\n".join(disk_content),
+            title="Disk",
+            border_style=THEME["border_style"], 
+            box=THEME["border"]
+        )
+        
+        # Create network panel
+        recv_mb = net_stats['bytes_recv'] / 1_000_000  # MB
+        sent_mb = net_stats['bytes_sent'] / 1_000_000  # MB
+        
+        network_content = [
+            f"[bold]Network Traffic:[/]",
+            f"Received: {recv_mb:.2f} MB ({net_stats['packets_recv']} packets)",
+            f"Sent: {sent_mb:.2f} MB ({net_stats['packets_sent']} packets)",
+        ]
+        
+        network_panel = Panel(
+            "\n".join(network_content),
+            title="Network",
+            border_style=THEME["border_style"], 
+            box=THEME["border"]
+        )
+        
+        # Create containers panel
+        if containers:
+            container_rows = []
+            for c in sorted(containers, key=lambda x: x['name']):
+                # Color code the CPU usage
+                cpu_color = "green"
+                if c['cpu'] > 60:
+                    cpu_color = "yellow"
+                if c['cpu'] > 85:
+                    cpu_color = "red"
+                    
+                # Color code the memory usage
+                mem_color = "green"
+                if c['memory_percent'] > 60:
+                    mem_color = "yellow"
+                if c['memory_percent'] > 85:
+                    mem_color = "red"
                 
-            self.historical_mem.append(memory.percent)
-            if len(self.historical_mem) > self.max_history:
-                self.historical_mem = self.historical_mem[-self.max_history:]
-            
-            # Get container stats
-            containers = self._get_container_stats()
-            
-            # Create console output
-            console = Console()
-            
-            # Create header
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            console.print(f"[bold {THEME['title_color']}]{THEME['app_title']} Resource Monitor - {now}[/]")
-            console.print("Press 'q' to exit safely", style="bold yellow")
-            console.print()
-            
-            # CPU section
-            console.print("[bold]CPU Usage[/]")
-            console.print(f"Total CPU: {cpu_percent}%")
-            console.print(f"CPU History: {self._create_sparkline(self.historical_cpu)}")
-            
-            # Display per-core usage
-            for i, cpu in enumerate(cpu_cores):
-                bar_color = "green"
-                if cpu > 60:
-                    bar_color = "yellow"
-                if cpu > 85:
-                    bar_color = "red"
+                container_rows.append(
+                    f"[bold]{c['name']}[/] ({c['id'][:12]}): " +
+                    f"CPU: [{cpu_color}]{c['cpu']:.1f}%[/{cpu_color}], " +
+                    f"Mem: [{mem_color}]{c['memory_percent']:.1f}%[/{mem_color}] ({c['memory_usage']}), " +
+                    f"Net: {c['network_io']}, IO: {c['block_io']}, PIDs: {c['pids']}"
+                )
                 
-                # Calculate width based on percentage and terminal width
-                max_bar_width = self.terminal_width - 20
-                width = min(int((max_bar_width * cpu) / 100), max_bar_width)
-                # Use ASCII characters for the bar
-                bar = f"CPU{i:2d} [{'#' * width}{' ' * (max_bar_width - width)}] {cpu:5.1f}%"
-                console.print(f"[{bar_color}]{bar}[/{bar_color}]")
+            containers_panel = Panel(
+                "\n".join(container_rows) if container_rows else "No containers running",
+                title=f"Docker Containers ({len(containers)})",
+                border_style=THEME["border_style"], 
+                box=THEME["border"]
+            )
+        else:
+            containers_panel = Panel(
+                "No containers running or unable to fetch container stats",
+                title="Docker Containers",
+                border_style=THEME["border_style"], 
+                box=THEME["border"]
+            )
             
-            console.print()
-            
-            # Memory section
-            console.print("[bold]Memory Usage[/]")
-            memory_used_gb = memory.used / (1024 * 1024 * 1024)
-            memory_total_gb = memory.total / (1024 * 1024 * 1024)
-            console.print(f"Memory: {memory.percent}% ({memory_used_gb:.1f}GB / {memory_total_gb:.1f}GB)")
-            console.print(f"Memory History: {self._create_sparkline(self.historical_mem)}")
-            console.print(f"Swap: {swap.percent}% ({swap.used / (1024*1024*1024):.1f}GB / {swap.total / (1024*1024*1024):.1f}GB)")
-            console.print()
-            
-            # Disk section
-            console.print("[bold]Disk Usage[/]")
-            console.print(f"Disk: {disk.percent}% ({disk.used / (1024*1024*1024):.1f}GB / {disk.total / (1024*1024*1024):.1f}GB)")
-            if disk_io:
-                console.print(f"Read: {disk_io.get('read_bytes', 0) / (1024*1024):.1f}MB, Write: {disk_io.get('write_bytes', 0) / (1024*1024):.1f}MB")
-            console.print()
-            
-            # Network section
-            console.print("[bold]Network Usage[/]")
-            console.print(f"Sent: {net_stats['bytes_sent'] / (1024*1024):.1f}MB ({net_stats['packets_sent']} packets)")
-            console.print(f"Received: {net_stats['bytes_recv'] / (1024*1024):.1f}MB ({net_stats['packets_recv']} packets)")
-            console.print()
-            
-            # Docker containers section
-            console.print(f"[bold]Docker Containers ({len(containers)})[/]")
-            if containers:
-                table = Table(show_header=True, header_style="bold")
-                table.add_column("Name", style="cyan")
-                table.add_column("CPU%", justify="right", style="green")
-                table.add_column("Mem Usage", justify="right", style="yellow")
-                table.add_column("Mem%", justify="right", style="yellow")
-                table.add_column("Net I/O", style="blue")
-                table.add_column("Block I/O", style="magenta")
-                table.add_column("PIDs", justify="right", style="dim")
-                
-                for container in containers:
-                    table.add_row(
-                        container['name'],
-                        f"{container['cpu']:.1f}%",
-                        container['memory_usage'],
-                        f"{container['memory_percent']:.1f}%",
-                        container['network_io'],
-                        container['block_io'],
-                        str(container['pids'])
-                    )
-                console.print(table)
-            else:
-                console.print("[yellow]No running containers[/]")
-            
-            console.print("\n[bold yellow]Press 'q' to exit the monitor[/]")
-            
-        except Exception as e:
-            console = Console()
-            console.print(f"[bold red]Error displaying resources: {str(e)}[/]")
-            traceback.print_exc()
+        # Create layout
+        layout = Table.grid()
+        layout.add_column("col")
+        
+        # Add the panels to the layout
+        layout.add_row(cpu_panel)
+        layout.add_row(memory_panel)
+        
+        # Create a grid for disk and network panels
+        disk_net_layout = Table.grid()
+        disk_net_layout.add_column("half")
+        disk_net_layout.add_column("half")
+        disk_net_layout.add_row(disk_panel, network_panel)
+        
+        layout.add_row(disk_net_layout)
+        layout.add_row(containers_panel)
+        
+        # Add footer with timestamp and exit instructions
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        footer = f"[dim]Last updated: {timestamp} - Press 'q' or ESC to exit safely[/dim]"
+        
+        # Print the layout
+        console.print(layout)
+        console.print(footer)
 
 # Helper functions
 def run_docker_command(command: List[str], show_output: bool = True) -> str:
@@ -988,6 +1083,7 @@ def system_rebalance():
 def system_monitor():
     """Monitor system resources"""
     console.print("[bold cyan]Starting system resource monitor. Press 'q' or ESC to exit safely, or CTRL+C to force exit.[/]")
+    time.sleep(1)  # Give a moment to read the instructions
     
     monitor = ResourceMonitor()
     try:
@@ -999,7 +1095,7 @@ def system_monitor():
         console.print(f"[bold red]Error in monitor: {str(e)}[/]")
     finally:
         monitor.stop()
-        console.print("[green]Resource monitor stopped successfully[/]")
+        console.print("[green]Resource monitor stopped.[/]")
 
 @system_app.command("scheduler")
 def scheduler_control(action: str = typer.Argument(..., help="Action to perform: 'start' or 'stop'")):
@@ -1042,6 +1138,7 @@ def status():
 def monitor():
     """Monitor system resources including CPU, memory, disk, and network"""
     console.print("[bold cyan]Starting resource monitor. Press 'q' or ESC to exit safely, or CTRL+C to force exit.[/]")
+    time.sleep(1)  # Give a moment to read the instructions
     
     # Create and start the monitor
     monitor = ResourceMonitor()
@@ -1054,7 +1151,7 @@ def monitor():
         console.print(f"[bold red]Error in monitor: {str(e)}[/]")
     finally:
         monitor.stop()
-        console.print("[green]Resource monitor stopped successfully[/]")
+        console.print("[green]Resource monitor stopped.[/]")
 
 @app.command()
 def logs(container: str = typer.Argument(None, help="Container name to view logs"),
@@ -1064,177 +1161,87 @@ def logs(container: str = typer.Argument(None, help="Container name to view logs
     container_logs(container, follow, tail)
 
 @app.command()
-def start(container: str = typer.Argument(None, help="Container name to start"),
-          wait: bool = typer.Option(False, "--wait", "-w", help="Wait for container to exit"),
-          interactive: bool = typer.Option(False, "--interactive", "-i", help="Start in interactive mode")):
+def start(container: str = None, wait: bool = False):
     """
-    Start a container by name. If the container doesn't exist, it will attempt to:
-    1. Create a container with that name from an image with the same name if it exists locally
-    2. Pull the image with that name from a registry if it doesn't exist locally
+    Start a Docker container.
+    If the container doesn't exist, try to create it from an image.
+    If the image doesn't exist locally, try to pull it from a registry.
     """
-    if interactive:
-        interactive_mode()
+    if container is None:
+        console.print("[bold red]ERROR[/] Container name is required")
         return
-    
-    if not container:
-        console.print("[bold red]Error:[/] Container name is required")
-        return
-    
-    api_available = True
-    task_id = None
-    
+        
     # Check if container exists
-    returncode, stdout, stderr = run_command_with_spinner(
-        "docker", ["container", "inspect", container],
-        f"Checking if container {container} exists..."
-    )
-    
-    # If container doesn't exist, try to create it from an image with the same name
-    if returncode != 0:
-        console.print(f"[yellow]Container {container} does not exist.[/]")
-        
-        # Check if image exists locally
-        returncode, stdout, stderr = run_command_with_spinner(
-            "docker", ["image", "inspect", container],
-            f"Checking if image {container} exists locally..."
-        )
-        
-        if returncode != 0:
-            console.print(f"[yellow]Image {container} not found locally. Pulling from registry...[/]")
-            
-            # Try to pull the image from registry
-            pull_code, pull_out, pull_err = run_command_with_spinner(
-                "docker", ["pull", container],
-                f"Pulling image {container}..."
-            )
-            
-            if pull_code != 0:
-                # Try to pull with latest tag
-                console.print(f"[yellow]Failed to pull image {container}. Trying {container}:latest...[/]")
-                pull_code, pull_out, pull_err = run_command_with_spinner(
-                    "docker", ["pull", f"{container}:latest"],
-                    f"Pulling image {container}:latest..."
-                )
-                
-                if pull_code != 0:
-                    console.print(f"[bold red]FAILED[/] Failed to pull image {container}")
-                    console.print(f"[red]{pull_err}[/]")
-                    return
-                else:
-                    container_image = f"{container}:latest"
-                    console.print(f"[bold green]SUCCESS[/] Image {container_image} pulled successfully")
-            else:
-                container_image = container
-                console.print(f"[bold green]SUCCESS[/] Image {container} pulled successfully")
-            
-            # Now create and start a container from the image
-            start_container_from_image(container, container_image, wait)
-            return
-        else:
-            # Now create and start a container from the image
-            start_container_from_image(container, container, wait)
-            return
-    
-    # Start the existing container
-    with console.status(f"[bold blue]Starting container {container}...", spinner="dots"):
-        # Find task ID associated with the container
-        result = api_request("containers")
-        
-        if result.get("api_unavailable"):
-            api_available = False
-        elif "containers" in result:
-            for c in result["containers"]:
-                if c.get("name") == container:
-                    task_id = c.get("task_id")
-                    break
-        
-        if api_available and task_id:
-            # Use the orchestrator API
-            result = api_request(f"tasks/{task_id}/start", method="POST")
-            if "error" in result:
-                console.print(f"[bold red]Error: {result['error']}[/]")
-                console.print("[yellow]Falling back to Docker CLI...[/]")
-                api_available = False
-            else:
-                if result.get("status") == "started":
-                    console.print(f"[bold green]SUCCESS[/] Container {container} started successfully")
-                else:
-                    console.print(f"[bold yellow]WARNING[/] Container start requested, but status is {result.get('status', 'unknown')}")
-        
-        if not api_available:
-            # Use Docker CLI directly
-            start_args = ["start"]
-            if wait:
-                start_args.append("--wait")
-            start_args.append(container)
-            
-            returncode, stdout, stderr = run_command_with_spinner(
-                "docker", start_args, 
-                f"Starting container {container}..."
-            )
-            
-            if returncode == 0:
-                console.print(f"[bold green]SUCCESS[/] Container {container} started successfully")
-            else:
-                console.print(f"[bold red]FAILED[/] Failed to start container {container}")
-                if stderr:
-                    console.print(f"[red]{stderr}[/]")
-
-def start_container_from_image(container_name: str, image_name: str, wait: bool = False):
-    """Create and start a container from an image, pulling if necessary"""
-    # Check if image exists locally, otherwise pull it
-    with console.status(f"[bold blue]Checking for image {image_name}...", spinner="dots"):
-        returncode, stdout, stderr = run_command_with_spinner(
-            "docker", ["image", "inspect", image_name],
-            f"Checking if image {image_name} exists locally..."
-        )
-        
-        if returncode != 0:
-            console.print(f"[yellow]Image {image_name} not found locally. Pulling from registry...[/]")
-            
-            pull_code, pull_out, pull_err = run_command_with_spinner(
-                "docker", ["pull", image_name],
-                f"Pulling image {image_name}..."
-            )
-            
-            if pull_code != 0:
-                console.print(f"[bold red]FAILED[/] Failed to pull image {image_name}")
-                console.print(f"[red]{pull_err}[/]")
-                return
-            else:
-                console.print(f"[bold green]SUCCESS[/] Image {image_name} pulled successfully")
-    
-    # Create and start a new container
-    with console.status(f"[bold blue]Creating container {container_name} from image {image_name}...", spinner="dots"):
-        returncode, stdout, stderr = run_command_with_spinner(
-            "docker", ["create", "--name", container_name, image_name],
-            f"Creating container {container_name}..."
-        )
-        
-        if returncode != 0:
-            console.print(f"[bold red]FAILED[/] Failed to create container {container_name}")
-            console.print(f"[red]{stderr}[/]")
-            return
-    
-    console.print(f"[bold green]SUCCESS[/] Created container {container_name} from image {image_name}")
-    
-    # Start the newly created container
-    start_args = ["start"]
-    if wait:
-        start_args.append("--wait")
-    start_args.append(container_name)
-    
-    returncode, stdout, stderr = run_command_with_spinner(
-        "docker", start_args, 
-        f"Starting container {container_name}..."
-    )
+    returncode, stdout, stderr = run_command("docker", ["container", "inspect", container], capture_output=True)
     
     if returncode == 0:
-        console.print(f"[bold green]SUCCESS[/] Container {container_name} started successfully")
+        # Container exists, start it
+        console.print(f"[yellow]Starting existing container {container}...[/]")
+        start_args = ["start"]
+        if wait:
+            start_args.append("--wait")
+        start_args.append(container)
+        
+        returncode, stdout, stderr = run_command_with_spinner(
+            "docker", start_args, 
+            f"Starting container {container}..."
+        )
+        
+        if returncode == 0:
+            console.print(f"[bold green]SUCCESS[/] Container {container} started successfully")
+        else:
+            console.print(f"[bold red]FAILED[/] Failed to start container {container}")
+            if stderr:
+                console.print(f"[red]{stderr}[/]")
     else:
-        console.print(f"[bold red]FAILED[/] Failed to start container {container_name}")
-        if stderr:
-            console.print(f"[red]{stderr}[/]")
+        # Container doesn't exist, try to create it from image
+        console.print(f"[yellow]Container {container} doesn't exist, checking for image...[/]")
+        
+        # Try various image name formats
+        image_variations = [
+            container,                        # original name
+            f"docker.io/library/{container}", # official Docker Hub image
+            f"docker.io/{container}",         # Docker Hub user image
+            f"{container}:latest"             # with latest tag
+        ]
+        
+        # First check if any image exists locally
+        found_locally = False
+        local_image_name = None
+        
+        for img in image_variations:
+            returncode, stdout, stderr = run_command("docker", ["image", "inspect", img], capture_output=True)
+            if returncode == 0:
+                # Image exists locally
+                console.print(f"[green]Found image locally: {img}[/]")
+                found_locally = True
+                local_image_name = img
+                break
+        
+        if found_locally and local_image_name:
+            # Image exists locally
+            start_container_from_image(container, local_image_name, wait)
+        else:
+            # Try to pull image from registry
+            console.print(f"[yellow]Image not found locally, trying to pull from registry...[/]")
+            
+            # Try pulling variations of the image name
+            for img in image_variations:
+                console.print(f"[yellow]Trying to pull {img}...[/]")
+                returncode, stdout, stderr = run_command_with_spinner(
+                    "docker", ["pull", img],
+                    f"Pulling image {img}..."
+                )
+                
+                if returncode == 0:
+                    console.print(f"[bold green]SUCCESS[/] Image {img} pulled successfully")
+                    start_container_from_image(container, img, wait)
+                    return
+            
+            # All pull attempts failed
+            console.print(f"[bold red]FAILED[/] Failed to pull any image for {container}")
+            console.print("[yellow]Please make sure the image name is correct and accessible[/]")
+            console.print("[yellow]You can try: docker pull IMAGE_NAME first to troubleshoot[/]")
 
 @app.command()
 def stop(container: str = typer.Argument(None, help="Container name to stop")):
@@ -1389,49 +1396,55 @@ def container_submenu():
                         f"Checking if container {container_name} exists..."
                     )
                     
-                    # If container doesn't exist, try to create it from an image
-                    if returncode != 0:
-                        console.print(f"[yellow]Container {container_name} does not exist.[/]")
+                    # If container exists, start it
+                    if returncode == 0:
+                        console.print(f"[green]Container {container_name} exists. Starting...[/]")
                         
-                        # Check if image exists locally
+                        # Start the container
                         returncode, stdout, stderr = run_command_with_spinner(
-                            "docker", ["image", "inspect", container_name],
-                            f"Checking if image {container_name} exists locally..."
+                            "docker", ["start", container_name], 
+                            f"Starting container {container_name}..."
                         )
                         
-                        if returncode != 0:
-                            console.print(f"[yellow]Image {container_name} not found locally. Pulling from registry...[/]")
-                            
-                            # Try to pull the image from registry
-                            pull_code, pull_out, pull_err = run_command_with_spinner(
-                                "docker", ["pull", container_name],
-                                f"Pulling image {container_name}..."
+                        if returncode == 0:
+                            console.print(f"[bold green]✓[/] Container {container_name} started successfully")
+                        else:
+                            console.print(f"[bold red]✗[/] Failed to start container {container_name}")
+                            if stderr:
+                                console.print(f"[red]{stderr}[/]")
+                    # If container doesn't exist, try to create it from an image
+                    else:
+                        console.print(f"[yellow]Container {container_name} does not exist.[/]")
+                        
+                        # Try various image name formats
+                        image_variations = [
+                            container_name,                         # original name
+                            f"docker.io/library/{container_name}",  # official Docker Hub image
+                            f"docker.io/{container_name}",          # Docker Hub user image
+                            f"{container_name}:latest"              # with latest tag
+                        ]
+                        
+                        # First check if any image exists locally
+                        found_locally = False
+                        local_image_name = None
+                        
+                        for img in image_variations:
+                            returncode, stdout, stderr = run_command(
+                                "docker", ["image", "inspect", img],
+                                capture_output=True
                             )
                             
-                            if pull_code != 0:
-                                console.print(f"[bold red]✗[/] Failed to pull image {container_name}")
-                                console.print(f"[red]{pull_err}[/]")
-                            else:
-                                console.print(f"[bold green]✓[/] Image {container_name} pulled successfully")
-                                
-                                # Create a container from the image
-                                create_code, create_out, create_err = run_command_with_spinner(
-                                    "docker", ["create", "--name", container_name, container_name],
-                                    f"Creating container {container_name}..."
-                                )
-                                
-                                if create_code != 0:
-                                    console.print(f"[bold red]✗[/] Failed to create container {container_name}")
-                                    console.print(f"[red]{create_err}[/]")
-                                else:
-                                    console.print(f"[bold green]✓[/] Container {container_name} created successfully")
-                        else:
-                            console.print(f"[green]Image {container_name} found locally[/]")
-                            
-                            # Create a container from the existing image
+                            if returncode == 0:
+                                console.print(f"[green]Found image locally: {img}[/]")
+                                found_locally = True
+                                local_image_name = img
+                                break
+                        
+                        if found_locally and local_image_name:
+                            # Create a container from the local image
                             create_code, create_out, create_err = run_command_with_spinner(
-                                "docker", ["create", "--name", container_name, container_name],
-                                f"Creating container {container_name}..."
+                                "docker", ["create", "--name", container_name, local_image_name],
+                                f"Creating container {container_name} from image {local_image_name}..."
                             )
                             
                             if create_code != 0:
@@ -1439,19 +1452,68 @@ def container_submenu():
                                 console.print(f"[red]{create_err}[/]")
                             else:
                                 console.print(f"[bold green]✓[/] Container {container_name} created successfully")
-                    
-                    # Now start the container (either existing or newly created)
-                    returncode, stdout, stderr = run_command_with_spinner(
-                        "docker", ["start", container_name], 
-                        f"Starting container {container_name}..."
-                    )
-                    
-                    if returncode == 0:
-                        console.print(f"[bold green]✓[/] Container {container_name} started successfully")
-                    else:
-                        console.print(f"[bold red]✗[/] Failed to start container {container_name}")
-                        if stderr:
-                            console.print(f"[red]{stderr}[/]")
+                                
+                                # Start the newly created container
+                                returncode, stdout, stderr = run_command_with_spinner(
+                                    "docker", ["start", container_name], 
+                                    f"Starting container {container_name}..."
+                                )
+                                
+                                if returncode == 0:
+                                    console.print(f"[bold green]✓[/] Container {container_name} started successfully")
+                                else:
+                                    console.print(f"[bold red]✗[/] Failed to start container {container_name}")
+                                    if stderr:
+                                        console.print(f"[red]{stderr}[/]")
+                        else:
+                            # Try to pull the image from registry
+                            console.print(f"[yellow]Image not found locally. Attempting to pull from registry...[/]")
+                            
+                            pull_success = False
+                            pulled_image = None
+                            
+                            for img in image_variations:
+                                console.print(f"[yellow]Trying to pull {img}...[/]")
+                                pull_code, pull_out, pull_err = run_command_with_spinner(
+                                    "docker", ["pull", img],
+                                    f"Pulling image {img}..."
+                                )
+                                
+                                if pull_code == 0:
+                                    console.print(f"[bold green]✓[/] Image {img} pulled successfully")
+                                    pull_success = True
+                                    pulled_image = img
+                                    break
+                            
+                            if pull_success and pulled_image:
+                                # Create a container from the pulled image
+                                create_code, create_out, create_err = run_command_with_spinner(
+                                    "docker", ["create", "--name", container_name, pulled_image],
+                                    f"Creating container {container_name} from image {pulled_image}..."
+                                )
+                                
+                                if create_code != 0:
+                                    console.print(f"[bold red]✗[/] Failed to create container {container_name}")
+                                    console.print(f"[red]{create_err}[/]")
+                                else:
+                                    console.print(f"[bold green]✓[/] Container {container_name} created successfully")
+                                    
+                                    # Start the newly created container
+                                    returncode, stdout, stderr = run_command_with_spinner(
+                                        "docker", ["start", container_name], 
+                                        f"Starting container {container_name}..."
+                                    )
+                                    
+                                    if returncode == 0:
+                                        console.print(f"[bold green]✓[/] Container {container_name} started successfully")
+                                    else:
+                                        console.print(f"[bold red]✗[/] Failed to start container {container_name}")
+                                        if stderr:
+                                            console.print(f"[red]{stderr}[/]")
+                            else:
+                                console.print(f"[bold red]✗[/] Failed to pull any image for {container_name}")
+                                console.print("[yellow]Please make sure the image name is correct and accessible[/]")
+                                console.print("[yellow]You can try: docker pull IMAGE_NAME first to troubleshoot[/]")
             
             elif container_action == "Stop Container":
                 # Select a container to stop
@@ -3151,7 +3213,7 @@ def display_keyboard_shortcuts():
         ("Ctrl+H", "Show this help screen"),
         ("Ctrl+S", "Save current configuration"),
         ("Ctrl+R", "Refresh current view"),
-        ("q", "Exit from monitor views")
+        ("q or ESC", "Exit from monitor views safely")
     ]
     
     # Create a table for the shortcuts
@@ -3172,9 +3234,52 @@ def display_keyboard_shortcuts():
     
     console.print(panel)
     
+    # Add additional note about monitor view
+    console.print("\n[yellow]Note:[/] [cyan]When in Resource Monitor view, always use 'q' or ESC to exit safely.[/]")
+    console.print("[cyan]Using Ctrl+C in the Resource Monitor will exit the entire application.[/]")
+    
     # Wait for user to press Enter before returning
     console.print("\n[dim]Press Enter to continue...[/]", end="")
     input()
+
+def start_container_from_image(container_name, image_name, wait=False):
+    """
+    Create and start a container with the given name from the specified image
+    """
+    # Create the container from the image
+    console.print(f"[yellow]Creating container {container_name} from image {image_name}...[/]")
+    create_args = ["create", "--name", container_name]
+    create_args.append(image_name)
+    
+    returncode, stdout, stderr = run_command_with_spinner(
+        "docker", create_args,
+        f"Creating container {container_name} from image {image_name}..."
+    )
+    
+    if returncode != 0:
+        console.print(f"[bold red]FAILED[/] Failed to create container {container_name}")
+        console.print(f"[red]{stderr}[/]")
+        return
+    
+    console.print(f"[bold green]SUCCESS[/] Container {container_name} created successfully")
+        
+    # Start the newly created container
+    start_args = ["start"]
+    if wait:
+        start_args.append("--wait")
+    start_args.append(container_name)
+    
+    returncode, stdout, stderr = run_command_with_spinner(
+        "docker", start_args,
+        f"Starting container {container_name}..."
+    )
+    
+    if returncode == 0:
+        console.print(f"[bold green]SUCCESS[/] Container {container_name} started successfully")
+    else:
+        console.print(f"[bold red]FAILED[/] Failed to start container {container_name}")
+        if stderr:
+            console.print(f"[red]{stderr}[/]")
 
 if __name__ == "__main__":
     # Register signal handler for clean exit
